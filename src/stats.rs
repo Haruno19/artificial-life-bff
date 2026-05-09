@@ -9,6 +9,18 @@ use crate::constants::*;
 
 const OPCODES: [u8; 10] = [b'<', b'>', b'{', b'}', b'+', b'-', b'.', b',', b'[', b']'];
 
+// 256-entry lookup table: IS_OPCODE[b] == true iff b is one of the 10 BFF opcodes.
+// Avoids a linear scan over OPCODES on every byte in the soup.
+const IS_OPCODE: [bool; 256] = {
+    let mut t = [false; 256];
+    let mut i = 0;
+    while i < OPCODES.len() {
+        t[OPCODES[i] as usize] = true;
+        i += 1;
+    }
+    t
+};
+
 // Width of the progress bar in chars between [ and ].
 // Kept comfortably narrower than the table so it fits on one terminal line
 // (otherwise \r only resets the wrapped line and the bar duplicates).
@@ -40,7 +52,7 @@ pub fn opcode_frequency(tapes: &[[u8; TAPE_SIZE]]) -> f64 {
     let mut count: f64 = 0.0;
     for tape in tapes {
         for byte in tape {
-            if OPCODES.contains(byte) {
+            if IS_OPCODE[*byte as usize] {
                 count += 1.0;
             }
         }
@@ -59,7 +71,7 @@ pub fn unique_code(tapes: &[[u8; TAPE_SIZE]]) -> usize {
         .map(|t| {
             let mut skel = [0u8; TAPE_SIZE];
             for (i, &b) in t.iter().enumerate() {
-                if OPCODES.contains(&b) {
+                if IS_OPCODE[b as usize] {
                     skel[i] = b;
                 }
             }
@@ -82,7 +94,13 @@ pub fn sample_tapes(tapes: &[[u8; TAPE_SIZE]], n: usize) -> Vec<String> {
         log.push(
             tapes[i]
                 .iter()
-                .map(|&b| if OPCODES.contains(&b) { b as char } else { ' ' })
+                .map(|&b| {
+                    if IS_OPCODE[b as usize] {
+                        b as char
+                    } else {
+                        ' '
+                    }
+                })
                 .collect(),
         );
     }
@@ -173,8 +191,12 @@ pub fn report(tapes: &[[u8; TAPE_SIZE]], epoch: usize, log_path: &str) {
 
 // Update the progress bar in place, called every epoch.
 pub fn update_progress(current: usize, total: usize) {
-    print!("\r\x1b[K{}", make_progress_bar(current, total));
-    stdout().flush().unwrap();
+    let prev_filled = (current.saturating_sub(1) * BAR_WIDTH) / total.max(1);
+    let filled = (current * BAR_WIDTH) / total.max(1);
+    if filled != prev_filled {
+        print!("\r\x1b[K{}", make_progress_bar(current, total));
+        stdout().flush().unwrap();
+    }
 }
 
 // Print a final closing line for the table when the run ends.

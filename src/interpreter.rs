@@ -13,30 +13,47 @@ const OP_COPY_1_TO_0: u8 = b','; // tape[h0] = tape[h1]
 const OP_LOOP_OPEN: u8 = b'[';
 const OP_LOOP_CLOSE: u8 = b']';
 
-// Precompute matching bracket positions so [ and ] are O(1) during execution.
-// Returns an array where jumps[i] = matching bracket index for position i,
-// or 0 if position i is not a bracket.
-fn build_jump_table(tape: &[u8; COMBINED_SIZE]) -> [Option<usize>; COMBINED_SIZE] {
-    let mut jumps = [None; COMBINED_SIZE];
-    let mut stack: Vec<usize> = Vec::new();
-
-    for i in 0..COMBINED_SIZE {
-        if tape[i] == OP_LOOP_OPEN {
-            stack.push(i);
-        }
-        if tape[i] == OP_LOOP_CLOSE {
-            if let Some(open) = stack.pop() {
-                jumps[open] = Some(i);
-                jumps[i] = Some(open);
+fn match_forward(tape: &[u8; COMBINED_SIZE], from: usize) -> Option<usize> {
+    let mut depth: i32 = 1;
+    let mut i = from + 1;
+    while i < COMBINED_SIZE {
+        match tape[i] {
+            OP_LOOP_OPEN => depth += 1,
+            OP_LOOP_CLOSE => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
             }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn match_backward(tape: &[u8; COMBINED_SIZE], from: usize) -> Option<usize> {
+    let mut depth: i32 = 1;
+    let mut i = from;
+    while i > 0 {
+        i -= 1;
+        match tape[i] {
+            OP_LOOP_CLOSE => depth += 1,
+            OP_LOOP_OPEN => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
-    return jumps;
+    None
 }
 
 // Run the BFF interpreter on a 128-byte combined tape (tape A ++ tape B).
 // Mutates the tape in place — this is how programs modify themselves and each other.
-// Stops after MAX_STEPS instructions or when pc goes out of bounds.
+// Stops after MAX_STEPS instructions.
 //
 // State:
 //   pc  — program counter, reads opcodes sequentially
@@ -45,17 +62,11 @@ fn build_jump_table(tape: &[u8; COMBINED_SIZE]) -> [Option<usize>; COMBINED_SIZE
 //
 // All three pointers wrap around modulo COMBINED_SIZE.
 pub fn run(tape: &mut [u8; COMBINED_SIZE]) {
-    let jumps = build_jump_table(tape);
-
     let mut pc: usize = 0;
     let mut h0: usize = 0;
     let mut h1: usize = 0;
 
     for _ in 0..MAX_STEPS {
-        if pc >= COMBINED_SIZE {
-            break;
-        }
-
         match tape[pc] {
             OP_H0_LEFT => h0 = (h0 + COMBINED_SIZE - 1) % COMBINED_SIZE,
             OP_H0_RIGHT => h0 = (h0 + 1) % COMBINED_SIZE,
@@ -66,15 +77,15 @@ pub fn run(tape: &mut [u8; COMBINED_SIZE]) {
             OP_COPY_0_TO_1 => tape[h1] = tape[h0],
             OP_COPY_1_TO_0 => tape[h0] = tape[h1],
             OP_LOOP_OPEN => {
-                if let Some(target) = jumps[pc] {
-                    if tape[h0] == 0 {
-                        pc = target
+                if tape[h0] == 0 {
+                    if let Some(target) = match_forward(tape, pc) {
+                        pc = target;
                     }
                 }
             }
             OP_LOOP_CLOSE => {
-                if let Some(target) = jumps[pc] {
-                    if tape[h0] != 0 {
+                if tape[h0] != 0 {
+                    if let Some(target) = match_backward(tape, pc) {
                         pc = target;
                     }
                 }
@@ -82,6 +93,6 @@ pub fn run(tape: &mut [u8; COMBINED_SIZE]) {
             _ => {} // everything else is raw data, no-op
         }
 
-        pc += 1;
+        pc = (pc + 1) % COMBINED_SIZE;
     }
 }
