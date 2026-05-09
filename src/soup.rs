@@ -78,12 +78,23 @@ impl Soup {
         println!("  log file:      {}", log_path);
         println!();
 
+        // table header + initial (epoch 0) row + progress bar
+        stats::print_header();
+        stats::init_print(&self.tapes, log_path);
+
         for _ in 0..EPOCHS {
             self.epoch();
             self.epoch_count += 1;
+
             if self.epoch_count % EVAL_STEPS == 0 {
                 stats::report(&self.tapes, self.epoch_count, log_path);
+            } else {
+                // update the progress bar towards the next eval
+                let progress = self.epoch_count % EVAL_STEPS;
+                stats::update_progress(progress, EVAL_STEPS);
             }
         }
+
+        stats::print_footer();
     }
 }

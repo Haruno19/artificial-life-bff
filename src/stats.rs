@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Write, stdout};
 
 use rand::Rng;
 use serde_json::json;
@@ -9,7 +9,13 @@ use crate::constants::*;
 
 const OPCODES: [u8; 10] = [b'<', b'>', b'{', b'}', b'+', b'-', b'.', b',', b'[', b']'];
 
-// Compute Shannon entropy over all byte values across all tapes.
+// Width of the progress bar in chars between [ and ].
+// Kept comfortably narrower than the table so it fits on one terminal line
+// (otherwise \r only resets the wrapped line and the bar duplicates).
+const BAR_WIDTH: usize = 66;
+
+// ----- metrics -----
+
 pub fn entropy(tapes: &[[u8; TAPE_SIZE]]) -> f64 {
     let total = (tapes.len() * TAPE_SIZE) as f64;
     let mut counts = [0u64; 256];
@@ -30,8 +36,6 @@ pub fn entropy(tapes: &[[u8; TAPE_SIZE]]) -> f64 {
         .sum()
 }
 
-// Compute what fraction of bytes across all tapes are valid opcodes.
-// A rising value signals that programs are writing opcodes into the soup.
 pub fn opcode_frequency(tapes: &[[u8; TAPE_SIZE]]) -> f64 {
     let mut count: f64 = 0.0;
     for tape in tapes {
@@ -44,18 +48,11 @@ pub fn opcode_frequency(tapes: &[[u8; TAPE_SIZE]]) -> f64 {
     count / (TAPE_SIZE * tapes.len()) as f64
 }
 
-// Count how many distinct (unique) tapes exist in the soup.
-// Starts near the soup size (all random = all unique).
-// A sharp drop signals replicators are copying themselves everywhere.
 pub fn unique_count(tapes: &[[u8; TAPE_SIZE]]) -> usize {
     let unique: HashSet<&[u8; TAPE_SIZE]> = tapes.iter().collect();
     unique.len()
 }
 
-// Count distinct "code skeletons" — tapes compared on opcode bytes only,
-// with all non-opcode bytes replaced by 0. Catches families of similar
-// replicators that the strict unique_count misses because their data
-// bytes drift.
 pub fn unique_code(tapes: &[[u8; TAPE_SIZE]]) -> usize {
     let unique: HashSet<[u8; TAPE_SIZE]> = tapes
         .iter()
@@ -72,8 +69,6 @@ pub fn unique_code(tapes: &[[u8; TAPE_SIZE]]) -> usize {
     unique.len()
 }
 
-// Sample `n` random tapes and render each as a string.
-// Opcode bytes are shown as their ASCII character, everything else as '.'.
 pub fn sample_tapes(tapes: &[[u8; TAPE_SIZE]], n: usize) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let mut picked = HashSet::new();
@@ -87,36 +82,119 @@ pub fn sample_tapes(tapes: &[[u8; TAPE_SIZE]], n: usize) -> Vec<String> {
         log.push(
             tapes[i]
                 .iter()
-                .map(|&b| {
-                    if OPCODES.contains(&b) {
-                        b as char
-                    } else {
-                        '　'
-                    }
-                })
+                .map(|&b| if OPCODES.contains(&b) { b as char } else { ' ' })
                 .collect(),
         );
     }
-    return log;
+    log
 }
 
-// Print a stats report to the terminal and append a JSON line to log.jsonl.
-// Samples are only written to the file, not printed.
+// ----- formatting helpers -----
+
+fn format_row(epoch: usize, h: f64, op_freq: f64, unique: usize, unique_c: usize) -> String {
+    format!(
+        "│ {:>9} │ {:>8.4} │ {:>11.2}% │ {:>12} │ {:>11} │",
+        epoch,
+        h,
+        op_freq * 100.0,
+        unique,
+        unique_c,
+    )
+}
+
+fn make_progress_bar(current: usize, total: usize) -> String {
+    let filled = (current * BAR_WIDTH) / total.max(1);
+    let empty = BAR_WIDTH - filled;
+    format!("[{}{}]", "=".repeat(filled), ".".repeat(empty))
+}
+
+// ----- public printing API -----
+
+// Print the table header (one-time, at start).
+pub fn print_header() {
+    println!("┌───────────┬──────────┬──────────────┬──────────────┬─────────────┐");
+    println!("│   epoch   │ entropy  │ opcode freq. │ unique tapes │ unique code │");
+    println!("├───────────┼──────────┼──────────────┼──────────────┼─────────────┤");
+}
+
+// First-time stats print (epoch 0). Prints the row, two blank lines, and the
+// initial empty progress bar.
+pub fn init_print(tapes: &[[u8; TAPE_SIZE]], log_path: &str) {
+    let h = entropy(tapes);
+    let op_freq = opcode_frequency(tapes);
+    let unique = unique_count(tapes);
+    let unique_c = unique_code(tapes);
+
+    println!("{}", format_row(0, h, op_freq, unique, unique_c));
+    println!();
+    println!();
+    print!("{}", make_progress_bar(0, EVAL_STEPS));
+    stdout().flush().unwrap();
+
+    write_log(
+        0,
+        h,
+        op_freq,
+        unique,
+        unique_c,
+        sample_tapes(tapes, 4),
+        log_path,
+    );
+}
+
+// Periodic stats report. Moves cursor up to overwrite the progress bar area,
+// prints the new row, then redraws the empty lines and a fresh progress bar.
 pub fn report(tapes: &[[u8; TAPE_SIZE]], epoch: usize, log_path: &str) {
     let h = entropy(tapes);
     let op_freq = opcode_frequency(tapes);
     let unique = unique_count(tapes);
     let unique_c = unique_code(tapes);
-    let samples = sample_tapes(tapes, 4);
 
-    // print summary to terminal (no samples)
-    println!("--- epoch {} ---", epoch);
-    println!("  entropy:       {:.4}", h);
-    println!("  opcode freq:   {:.2}%", op_freq * 100.0);
-    println!("  unique tapes:  {}", unique);
-    println!("  unique code:   {}", unique_c);
+    // \x1b[2A = up 2 lines, \r = column 0, \x1b[J = clear from cursor to end of screen
+    // After this we're sitting on the first empty line below the table; print our row,
+    // then 2 newlines, then a fresh progress bar.
+    print!("\x1b[2A\r\x1b[J");
+    println!("{}", format_row(epoch, h, op_freq, unique, unique_c));
+    println!();
+    println!();
+    print!("{}", make_progress_bar(0, EVAL_STEPS));
+    stdout().flush().unwrap();
 
-    // append one JSON line to the log file
+    write_log(
+        epoch,
+        h,
+        op_freq,
+        unique,
+        unique_c,
+        sample_tapes(tapes, 4),
+        log_path,
+    );
+}
+
+// Update the progress bar in place, called every epoch.
+pub fn update_progress(current: usize, total: usize) {
+    print!("\r\x1b[K{}", make_progress_bar(current, total));
+    stdout().flush().unwrap();
+}
+
+// Print a final closing line for the table when the run ends.
+pub fn print_footer() {
+    // wipe progress bar + 2 empty lines, then close the table
+    print!("\x1b[2A\r\x1b[J");
+    println!("└───────────┴──────────┴──────────────┴──────────────┴─────────────┘");
+}
+
+// ----- jsonl logging -----
+
+fn write_log(
+    epoch: usize,
+    h: f64,
+    op_freq: f64,
+    unique: usize,
+    unique_c: usize,
+    samples: Vec<String>,
+    log_path: &str,
+) {
     let record = json!({
         "epoch":         epoch,
         "entropy":       h,
@@ -127,8 +205,8 @@ pub fn report(tapes: &[[u8; TAPE_SIZE]], epoch: usize, log_path: &str) {
     });
 
     let mut file = OpenOptions::new()
-        .create(true) // create if it doesn't exist
-        .append(true) // never overwrite, always add to the end
+        .create(true)
+        .append(true)
         .open(log_path)
         .expect("could not open log file");
 
