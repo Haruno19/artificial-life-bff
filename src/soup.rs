@@ -56,23 +56,23 @@ impl Soup {
         }
     }
 
-    pub fn run(&mut self, log_path: &str) {
+    pub fn run(&mut self, log_path: &str, samples_path: &str) {
         println!("=== run parameters ===");
         println!("  soup size:     {}", SOUP_SIZE);
         println!("  tape size:     {}", TAPE_SIZE);
         println!("  max steps:     {}", MAX_STEPS);
         println!("  epochs:        {}", EPOCHS);
         println!("  eval every:    {}", EVAL_STEPS);
+        println!("  sample every:  {}", SAMPLE_STEPS);
+        println!("  sample count:  {}", SAMPLE_COUNT);
         println!("  mutation rate: {}", MUTATION_RATE);
         println!("  log file:      {}", log_path);
+        println!("  samples file:  {}", samples_path);
         println!();
 
         // table header + initial (epoch 0) row + progress bar
         stats::print_header();
-        stats::init_print(&self.tapes, log_path);
-
-        // Track the last rendered bar fill so we only redraw on visual change.
-        let mut last_filled: usize = 0;
+        stats::init_print(&self.tapes, log_path, samples_path);
 
         for _ in 0..EPOCHS {
             self.epoch();
@@ -80,14 +80,12 @@ impl Soup {
 
             if self.epoch_count % EVAL_STEPS == 0 {
                 stats::report(&self.tapes, self.epoch_count, log_path);
-                last_filled = 0; // fresh bar after a report
             } else {
-                let progress = self.epoch_count % EVAL_STEPS;
-                let filled = (progress * BAR_WIDTH) / EVAL_STEPS;
-                if filled != last_filled {
-                    stats::update_progress(progress, EVAL_STEPS);
-                    last_filled = filled;
-                }
+                stats::update_progress(self.epoch_count % EVAL_STEPS, EVAL_STEPS);
+            }
+
+            if self.epoch_count % SAMPLE_STEPS == 0 {
+                stats::write_samples(&self.tapes, self.epoch_count, samples_path);
             }
         }
 

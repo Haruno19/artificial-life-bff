@@ -76,12 +76,12 @@ pub fn unique_code(tapes: &[[u8; TAPE_SIZE]]) -> usize {
     unique.len()
 }
 
-pub fn sample_tapes(tapes: &[[u8; TAPE_SIZE]], n: usize) -> Vec<String> {
+fn sample_tapes(tapes: &[[u8; TAPE_SIZE]]) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let mut picked = HashSet::new();
-    let mut log = Vec::with_capacity(n);
+    let mut log = Vec::with_capacity(SAMPLE_COUNT);
 
-    while picked.len() < n {
+    while picked.len() < SAMPLE_COUNT {
         picked.insert(rng.gen_range(0..tapes.len()));
     }
 
@@ -89,13 +89,7 @@ pub fn sample_tapes(tapes: &[[u8; TAPE_SIZE]], n: usize) -> Vec<String> {
         log.push(
             tapes[i]
                 .iter()
-                .map(|&b| {
-                    if IS_OPCODE[b as usize] {
-                        b as char
-                    } else {
-                        ' '
-                    }
-                })
+                .map(|&b| if IS_OPCODE[b as usize] { b as char } else { ' ' })
                 .collect(),
         );
     }
@@ -132,7 +126,7 @@ pub fn print_header() {
 
 // First-time stats print (epoch 0). Prints the row, two blank lines, and the
 // initial empty progress bar.
-pub fn init_print(tapes: &[[u8; TAPE_SIZE]], log_path: &str) {
+pub fn init_print(tapes: &[[u8; TAPE_SIZE]], log_path: &str, samples_path: &str) {
     let h = entropy(tapes);
     let op_freq = opcode_frequency(tapes);
     let unique = unique_count(tapes);
@@ -144,15 +138,8 @@ pub fn init_print(tapes: &[[u8; TAPE_SIZE]], log_path: &str) {
     print!("{}", make_progress_bar(0, EVAL_STEPS));
     stdout().flush().unwrap();
 
-    write_log(
-        0,
-        h,
-        op_freq,
-        unique,
-        unique_c,
-        sample_tapes(tapes, 4),
-        log_path,
-    );
+    write_log(0, h, op_freq, unique, unique_c, log_path);
+    write_samples(tapes, 0, samples_path);
 }
 
 // Periodic stats report. Moves cursor up to overwrite the progress bar area,
@@ -173,15 +160,7 @@ pub fn report(tapes: &[[u8; TAPE_SIZE]], epoch: usize, log_path: &str) {
     print!("{}", make_progress_bar(0, EVAL_STEPS));
     stdout().flush().unwrap();
 
-    write_log(
-        epoch,
-        h,
-        op_freq,
-        unique,
-        unique_c,
-        sample_tapes(tapes, 4),
-        log_path,
-    );
+    write_log(epoch, h, op_freq, unique, unique_c, log_path);
 }
 
 // Update the progress bar in place, called every epoch.
@@ -209,22 +188,33 @@ fn write_log(
     op_freq: f64,
     unique: usize,
     unique_c: usize,
-    samples: Vec<String>,
     log_path: &str,
 ) {
     let record = json!({
-        "epoch":         epoch,
-        "entropy":       h,
-        "opcode_freq":   op_freq,
-        "unique_tapes":  unique,
-        "unique_code":   unique_c,
-        "samples":       samples,
+        "epoch":        epoch,
+        "entropy":      h,
+        "opcode_freq":  op_freq,
+        "unique_tapes": unique,
+        "unique_code":  unique_c,
     });
 
+    append_jsonl(log_path, &record);
+}
+
+pub fn write_samples(tapes: &[[u8; TAPE_SIZE]], epoch: usize, samples_path: &str) {
+    let record = json!({
+        "epoch":   epoch,
+        "samples": sample_tapes(tapes),
+    });
+
+    append_jsonl(samples_path, &record);
+}
+
+fn append_jsonl(path: &str, record: &serde_json::Value) {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path)
+        .open(path)
         .expect("could not open log file");
 
     writeln!(file, "{}", record).expect("could not write to log file");
