@@ -21,11 +21,6 @@ const IS_OPCODE: [bool; 256] = {
     t
 };
 
-// Width of the progress bar in chars between [ and ].
-// Kept comfortably narrower than the table so it fits on one terminal line
-// (otherwise \r only resets the wrapped line and the bar duplicates).
-const BAR_WIDTH: usize = 66;
-
 // ----- metrics -----
 
 pub fn entropy(tapes: &[[u8; TAPE_SIZE]]) -> f64 {

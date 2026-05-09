@@ -9,3 +9,6 @@ pub const EVAL_STEPS: usize = 10_000; // print stats every N epochs
 
 // Set to 0.0 to disable random mutation.
 pub const MUTATION_RATE: f64 = 0.00024;
+
+// Width of the progress bar in chars between [ and ].
+pub const BAR_WIDTH: usize = 66;

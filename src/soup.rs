@@ -1,6 +1,7 @@
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
+use rayon::prelude::*;
 
 use crate::constants::*;
 use crate::interpreter;
@@ -30,25 +31,12 @@ impl Soup {
         }
     }
 
-    fn interact(&mut self, i: usize, j: usize) {
-        let mut combined = [0u8; COMBINED_SIZE];
-        combined[..TAPE_SIZE].copy_from_slice(&self.tapes[i]);
-        combined[TAPE_SIZE..].copy_from_slice(&self.tapes[j]);
-
-        interpreter::run(&mut combined);
-
-        self.tapes[i].copy_from_slice(&combined[..TAPE_SIZE]);
-        self.tapes[j].copy_from_slice(&combined[TAPE_SIZE..]);
-    }
 
     fn epoch(&mut self) {
-        let size = self.tapes.len();
-        let mut order: Vec<usize> = (0..size).collect();
-        order.shuffle(&mut self.rng);
-
-        for chunk in order.chunks_exact(2) {
-            self.interact(chunk[0], chunk[1]);
-        }
+        self.tapes.shuffle(&mut self.rng);
+        self.tapes.par_chunks_mut(2).for_each(|pair| {
+            interact_pair(pair);
+        });
 
         if MUTATION_RATE > 0.0 {
             self.mutate_soup();
@@ -60,10 +48,11 @@ impl Soup {
         let total_bytes = (self.tapes.len() * TAPE_SIZE) as f64;
         let n_mutations = (total_bytes * MUTATION_RATE).round() as usize;
 
+        let mut rng = rand::thread_rng();
         for _ in 0..n_mutations {
-            let tape_idx = self.rng.gen_range(0..self.tapes.len());
-            let byte_idx = self.rng.gen_range(0..TAPE_SIZE);
-            self.tapes[tape_idx][byte_idx] = self.rng.gen_range(0u8..=255);
+            let tape_idx = rng.gen_range(0..self.tapes.len());
+            let byte_idx = rng.gen_range(0..TAPE_SIZE);
+            self.tapes[tape_idx][byte_idx] = rng.gen_range(0u8..=255);
         }
     }
 
@@ -82,19 +71,35 @@ impl Soup {
         stats::print_header();
         stats::init_print(&self.tapes, log_path);
 
+        // Track the last rendered bar fill so we only redraw on visual change.
+        let mut last_filled: usize = 0;
+
         for _ in 0..EPOCHS {
             self.epoch();
             self.epoch_count += 1;
 
             if self.epoch_count % EVAL_STEPS == 0 {
                 stats::report(&self.tapes, self.epoch_count, log_path);
+                last_filled = 0; // fresh bar after a report
             } else {
-                // update the progress bar towards the next eval
                 let progress = self.epoch_count % EVAL_STEPS;
-                stats::update_progress(progress, EVAL_STEPS);
+                let filled = (progress * BAR_WIDTH) / EVAL_STEPS;
+                if filled != last_filled {
+                    stats::update_progress(progress, EVAL_STEPS);
+                    last_filled = filled;
+                }
             }
         }
 
         stats::print_footer();
     }
+}
+
+fn interact_pair(pair: &mut [[u8; TAPE_SIZE]]) {
+    let mut combined = [0u8; COMBINED_SIZE];
+    combined[..TAPE_SIZE].copy_from_slice(&pair[0]);
+    combined[TAPE_SIZE..].copy_from_slice(&pair[1]);
+    interpreter::run(&mut combined);
+    pair[0].copy_from_slice(&combined[..TAPE_SIZE]);
+    pair[1].copy_from_slice(&combined[TAPE_SIZE..]);
 }
