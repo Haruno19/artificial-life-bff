@@ -1,6 +1,4 @@
-pub const TAPE_SIZE: usize = 64;
-pub const COMBINED_SIZE: usize = TAPE_SIZE * 2;
-pub const MAX_STEPS: usize = 8192;
+use crate::constants::*;
 
 // BFF opcodes - the 10 valid instructions
 // Everything else on the tape is treated as a no-op (raw data)
@@ -18,8 +16,6 @@ const OP_LOOP_CLOSE: u8 = b']';
 // Precompute matching bracket positions so [ and ] are O(1) during execution.
 // Returns an array where jumps[i] = matching bracket index for position i,
 // or 0 if position i is not a bracket.
-// TODO: implement — use a stack to match brackets as you scan left to right.
-//       Unmatched brackets should be left as 0 (treated as no-ops during execution).
 fn build_jump_table(tape: &[u8; COMBINED_SIZE]) -> [Option<usize>; COMBINED_SIZE] {
     let mut jumps = [None; COMBINED_SIZE];
     let mut stack: Vec<usize> = Vec::new();
