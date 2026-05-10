@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Write, stdout};
 
 use rand::Rng;
+use rayon::prelude::*;
 use serde_json::json;
 
 use crate::constants::*;
@@ -76,6 +77,156 @@ pub fn unique_code(tapes: &[[u8; TAPE_SIZE]]) -> usize {
     unique.len()
 }
 
+// ----- replicator detection -----
+//
+// "Compress" a tape down to its opcode/zero skeleton: keep only bytes that are
+// one of the 10 BFF opcodes or the literal '0' character (matching the sample
+// renderer). Everything else (the random non-code bytes that make up most of
+// each tape) is dropped. The result is a much shorter byte sequence that
+// captures the program's structure.
+fn compress_tape(tape: &[u8; TAPE_SIZE]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(TAPE_SIZE);
+    for &b in tape {
+        if IS_OPCODE[b as usize] || b == b'0' {
+            out.push(b);
+        }
+    }
+    out
+}
+
+// Replicator family classification.
+//   A  — body contains {`}`, `<`, `,`} (h0 is the copy destination)
+//   B  — body contains {`>`, `{`, `.`} (h1 is the copy destination)
+//   AB — body contains both trigrams (hybrid: copies in both directions)
+//   None — not a replicator
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+enum Family {
+    None,
+    A,
+    B,
+    AB,
+}
+
+impl Family {
+    fn as_str(self) -> &'static str {
+        match self {
+            Family::A => "A",
+            Family::B => "B",
+            Family::AB => "AB",
+            Family::None => "",
+        }
+    }
+}
+
+fn classify_body(body: &[u8]) -> Family {
+    let (mut h1r, mut h0l, mut c10) = (false, false, false);
+    let (mut h0r, mut h1l, mut c01) = (false, false, false);
+
+    for &b in body {
+        match b {
+            b'}' => h1r = true,
+            b'<' => h0l = true,
+            b',' => c10 = true,
+            b'>' => h0r = true,
+            b'{' => h1l = true,
+            b'.' => c01 = true,
+            _ => {}
+        }
+    }
+
+    let a = h1r && h0l && c10;
+    let b = h0r && h1l && c01;
+    match (a, b) {
+        (true, true) => Family::AB,
+        (true, false) => Family::A,
+        (false, true) => Family::B,
+        (false, false) => Family::None,
+    }
+}
+
+// Find every well-formed [...] in the compressed tape whose body qualifies as
+// a replicator. Brackets are matched left-to-right with a stack, so nested
+// loops are paired correctly; we report each matching pair independently
+// (an outer loop and a qualifying inner loop both get counted).
+//
+// Each loop is returned as (family, pattern) where pattern includes its [ and ].
+fn find_replicator_loops(compressed: &[u8]) -> Vec<(Family, String)> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut loops: Vec<(Family, String)> = Vec::new();
+
+    for (i, &b) in compressed.iter().enumerate() {
+        if b == b'[' {
+            stack.push(i);
+        } else if b == b']' {
+            if let Some(open) = stack.pop() {
+                let body = &compressed[open + 1..i];
+                let family = classify_body(body);
+                if family != Family::None {
+                    // safe: compressed only contains opcode bytes + '0', all ASCII
+                    let s = std::str::from_utf8(&compressed[open..=i])
+                        .expect("compressed tape should be ASCII")
+                        .to_string();
+                    loops.push((family, s));
+                }
+            }
+        }
+    }
+
+    loops
+}
+
+// One bucket per family in the catalogue output.
+struct FamilyBucket {
+    total: u64,
+    unique: usize,
+    patterns: Vec<(String, u64)>,
+}
+
+// Walk the soup, count occurrences of each distinct replicator pattern, grouped
+// by family. Parallelised with rayon: per-thread (family, pattern) HashMap,
+// merged at the end and split into family buckets.
+fn catalogue_replicators(
+    tapes: &[[u8; TAPE_SIZE]],
+) -> HashMap<&'static str, FamilyBucket> {
+    let counts: HashMap<(Family, String), u64> = tapes
+        .par_iter()
+        .fold(HashMap::<(Family, String), u64>::new, |mut acc, tape| {
+            let compressed = compress_tape(tape);
+            for (family, pattern) in find_replicator_loops(&compressed) {
+                *acc.entry((family, pattern)).or_insert(0) += 1;
+            }
+            acc
+        })
+        .reduce(HashMap::<(Family, String), u64>::new, |mut a, b| {
+            for (k, v) in b {
+                *a.entry(k).or_insert(0) += v;
+            }
+            a
+        });
+
+    // bucket by family
+    let mut buckets: HashMap<&'static str, FamilyBucket> = HashMap::new();
+    for ((family, pattern), count) in counts {
+        let entry = buckets.entry(family.as_str()).or_insert(FamilyBucket {
+            total: 0,
+            unique: 0,
+            patterns: Vec::new(),
+        });
+        entry.total += count;
+        entry.unique += 1;
+        entry.patterns.push((pattern, count));
+    }
+
+    // sort each bucket's patterns: descending count, ties by lexicographic key
+    for bucket in buckets.values_mut() {
+        bucket
+            .patterns
+            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    }
+
+    buckets
+}
+
 fn sample_tapes(tapes: &[[u8; TAPE_SIZE]]) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let mut picked = HashSet::new();
@@ -89,7 +240,7 @@ fn sample_tapes(tapes: &[[u8; TAPE_SIZE]]) -> Vec<String> {
         log.push(
             tapes[i]
                 .iter()
-                .map(|&b| if IS_OPCODE[b as usize] { b as char } else { ' ' })
+                .map(|&b| if IS_OPCODE[b as usize] || b == b'0' { b as char } else { ' ' })
                 .collect(),
         );
     }
@@ -208,6 +359,42 @@ pub fn write_samples(tapes: &[[u8; TAPE_SIZE]], epoch: usize, samples_path: &str
     });
 
     append_jsonl(samples_path, &record);
+}
+
+pub fn write_replicators(tapes: &[[u8; TAPE_SIZE]], epoch: usize, repl_path: &str) {
+    let buckets = catalogue_replicators(tapes);
+
+    let total_all: u64 = buckets.values().map(|b| b.total).sum();
+    let unique_all: usize = buckets.values().map(|b| b.unique).sum();
+
+    // build the per-family object — only include keys that actually have entries
+    let mut families = serde_json::Map::new();
+    for key in ["A", "B", "AB"] {
+        if let Some(bucket) = buckets.get(key) {
+            let patterns: Vec<serde_json::Value> = bucket
+                .patterns
+                .iter()
+                .map(|(s, c)| json!([s, c]))
+                .collect();
+            families.insert(
+                key.to_string(),
+                json!({
+                    "total":    bucket.total,
+                    "unique":   bucket.unique,
+                    "patterns": patterns,
+                }),
+            );
+        }
+    }
+
+    let record = json!({
+        "epoch":              epoch,
+        "total_replicators":  total_all,
+        "unique_replicators": unique_all,
+        "replicators":        families,
+    });
+
+    append_jsonl(repl_path, &record);
 }
 
 fn append_jsonl(path: &str, record: &serde_json::Value) {
